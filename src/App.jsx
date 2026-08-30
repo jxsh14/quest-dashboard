@@ -4,7 +4,7 @@ import {
   Settings as SettingsIcon, Bell, X, Check, Clock, Plus, Trash2, Pencil,
   Star, Send, RefreshCw, Flame, Award, ChevronLeft, ChevronRight,
   Volume2, VolumeX, Info, Sparkles, CheckCircle2, Circle, AlarmClock,
-  BookOpen, Zap, ShieldCheck, PlayCircle
+  BookOpen, Zap, ShieldCheck, PlayCircle, Copy, ListChecks
 } from "lucide-react";
 
 /* ============================================================
@@ -130,6 +130,11 @@ const WEEKDAYS_DE = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", 
 const WEEKDAYS_SHORT = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"];
 const MONTHS_DE = ["Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September", "Oktober", "November", "Dezember"];
 
+const SUBJECT_COLORS = ["#00E5A0", "#FF3D81", "#FFB020", "#5AA9FF", "#B18CFF", "#FF7A59", "#3DD6D0", "#F2C94C"];
+const SUBJECT_ICONS = ["📐", "📖", "🔬", "🌍", "🎨", "🏃", "💻", "🎵", "🗣️", "📝"];
+const REMINDER_OPTIONS = [5, 10, 15, 30];
+const HW_PRIORITIES = [{ key: "niedrig", label: "Niedrig", color: "#8892A6" }, { key: "mittel", label: "Mittel", color: "#FFB020" }, { key: "hoch", label: "Hoch", color: "#FF5470" }];
+
 const GROWTH_NOTE = "Du wächst noch. Wenn du Fragen zu Gewicht, Ernährung oder Training hast, sprich mit deinen Eltern oder einer Ärztin/einem Arzt.";
 
 /* ============================================================
@@ -142,6 +147,45 @@ const dateKey = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.ge
 const dayIndexMon0 = (d) => (d.getDay() + 6) % 7;
 const timeNowStr = (d) => `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
 const timeToMinutes = (t) => { const [h, m] = t.split(":").map(Number); return h * 60 + m; };
+const minutesToTime = (m) => { const mm = ((m % 1440) + 1440) % 1440; return `${pad2(Math.floor(mm / 60))}:${pad2(mm % 60)}`; };
+
+function getLessonsForDate(dateObj, lessons, exceptions) {
+  const day = dayIndexMon0(dateObj);
+  const key = dateKey(dateObj);
+  return lessons
+    .filter((l) => (l.specificDate ? l.specificDate === key : l.day === day))
+    .map((l) => {
+      const exc = (exceptions || {})[`${l.id}_${key}`];
+      if (exc) { if (exc.cancelled) return null; return { ...l, ...exc }; }
+      return l;
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.start.localeCompare(b.start));
+}
+function getSubjectById(subjects, id) { return (subjects || []).find((s) => s.id === id); }
+function formatLessonLine(l, subjects) {
+  const subj = getSubjectById(subjects, l.subjectId);
+  const name = subj ? subj.name : "Unterricht";
+  const room = l.room || subj?.room;
+  const teacher = l.teacher || subj?.teacher;
+  const extra = [room && `Raum ${room}`, teacher].filter(Boolean).join(" · ");
+  return extra ? `${l.start}–${l.end} ${name} (${extra})` : `${l.start}–${l.end} ${name}`;
+}
+function suggestFreeTrainingSlot(lessonsToday, eventsToday, now) {
+  const busy = [];
+  (lessonsToday || []).forEach((l) => busy.push([timeToMinutes(l.start), timeToMinutes(l.end)]));
+  (eventsToday || []).forEach((e) => busy.push([timeToMinutes(e.time), timeToMinutes(e.time) + 60]));
+  busy.sort((a, b) => a[0] - b[0]);
+  const nowMin = now.getHours() * 60 + now.getMinutes();
+  let cursor = nowMin;
+  const dayEnd = 21 * 60;
+  for (const [s, e] of busy) {
+    if (s > cursor + 30 && s <= dayEnd) return { start: cursor, end: s };
+    if (e > cursor) cursor = Math.max(cursor, e);
+  }
+  if (dayEnd - cursor >= 30) return { start: cursor, end: dayEnd };
+  return null;
+}
 
 function loadLS(key, fallback) {
   try {
@@ -185,6 +229,48 @@ function generateAIReply(input, ctx) {
 
   if (DIET_TRIGGERS.some((t) => lower.includes(t))) {
     return { text: `Ich helfe dir total gerne, dich stark und fit zu fühlen 💪 Themen wie Abnehmen, Diäten, Kalorienzählen oder Nahrungsergänzung solltest du aber am besten mit deinen Eltern oder einer Ärztin/einem Arzt besprechen, weil dein Körper gerade noch wächst. Ich kann dir stattdessen gerne bei ausgewogenen, leckeren Mahlzeiten oder einem coolen altersgerechten Training helfen – frag mich einfach!` };
+  }
+
+  const scheduleWords = ["stunde", "schule", "unterricht", "stundenplan"];
+  if (lower.includes("was habe ich heute") || (lower.includes("heute") && scheduleWords.some((w) => lower.includes(w)))) {
+    const list = ctx.getLessonsForDate ? ctx.getLessonsForDate(new Date()) : [];
+    if (list.length === 0) return { text: "Für heute habe ich keine Unterrichtsstunden in deinem Stundenplan gefunden. Du kannst sie im Bereich 'Stundenplan' eintragen." };
+    return { text: `Das steht heute laut deinem Stundenplan an:\n` + list.map((l) => "• " + formatLessonLine(l, ctx.subjects)).join("\n") };
+  }
+  if (lower.includes("was habe ich morgen") || (lower.includes("morgen") && !lower.includes("hausaufgabe") && scheduleWords.some((w) => lower.includes(w)))) {
+    const tmr = new Date(); tmr.setDate(tmr.getDate() + 1);
+    const list = ctx.getLessonsForDate ? ctx.getLessonsForDate(tmr) : [];
+    if (list.length === 0) return { text: "Morgen sind laut deinem Stundenplan keine Unterrichtsstunden eingetragen." };
+    return { text: `Das steht morgen an:\n` + list.map((l) => "• " + formatLessonLine(l, ctx.subjects)).join("\n") };
+  }
+  if (lower.includes("wann habe ich")) {
+    const subj = (ctx.subjects || []).find((s) => lower.includes(s.name.toLowerCase()));
+    if (subj) {
+      for (let i = 0; i < 8; i++) {
+        const d = new Date(); d.setDate(d.getDate() + i);
+        const list = (ctx.getLessonsForDate ? ctx.getLessonsForDate(d) : []).filter((l) => l.subjectId === subj.id);
+        if (list.length > 0) {
+          const dayLabel = i === 0 ? "heute" : i === 1 ? "morgen" : WEEKDAYS_DE[dayIndexMon0(d)];
+          return { text: `${subj.name} hast du ${dayLabel} ${list.map((l) => l.start + "–" + l.end).join(", ")}${list[0].room ? ` in Raum ${list[0].room}` : ""}.` };
+        }
+      }
+      return { text: `Ich habe in den nächsten Tagen keine Stunde für ${subj.name} in deinem Stundenplan gefunden.` };
+    }
+  }
+  if (lower.includes("hausaufgabe")) {
+    const targetDate = new Date();
+    let label = "heute fällig";
+    if (lower.includes("morgen")) { targetDate.setDate(targetDate.getDate() + 1); label = "morgen fällig"; }
+    const key = dateKey(targetDate);
+    const list = (ctx.homework || []).filter((h) => h.dueDate === key && !h.done);
+    if (list.length === 0) return { text: `Für ${label.replace(" fällig", "")} habe ich keine offenen Hausaufgaben gefunden. 🎉` };
+    return { text: `Diese Hausaufgaben sind ${label}:\n` + list.map((h) => { const s = getSubjectById(ctx.subjects, h.subjectId); return `• ${s ? s.name : "Fach"}: ${h.task}`; }).join("\n") };
+  }
+  if (lower.includes("wann kann ich") && lower.includes("trainier")) {
+    const lessonsToday = ctx.getLessonsForDate ? ctx.getLessonsForDate(new Date()) : [];
+    const slot = suggestFreeTrainingSlot(lessonsToday, ctx.eventsToday || [], new Date());
+    if (slot) return { text: `Zwischen ${minutesToTime(slot.start)} und ${minutesToTime(slot.end)} hast du laut Stundenplan und Kalender frei – das wäre ein guter Moment für ein kurzes Training! 💪`, workout: DEFAULT_WORKOUT() };
+    return { text: "Dein heutiger Tag ist ziemlich voll, aber vielleicht findest du zwischen zwei Terminen 15–20 Minuten für ein kurzes Training. Soll ich dir eines zeigen?", workout: DEFAULT_WORKOUT() };
   }
 
   if (lower.includes("was soll ich heute essen") || (lower.includes("heute") && lower.includes("essen"))) {
@@ -430,6 +516,27 @@ const STYLES = `
 
 .qd-empty { text-align:center; padding: 40px 20px; color: var(--text-muted); }
 .qd-note { display:flex; gap:10px; background: var(--gold-soft); border:1px solid rgba(255,176,32,0.4); color: var(--gold); border-radius: var(--radius-sm); padding: 12px 14px; font-size:13px; align-items:flex-start; }
+
+/* Stundenplan */
+.qd-schedule-table { display:grid; gap:10px; overflow-x:auto; }
+.qd-schedule-cols { display:grid; gap:10px; }
+.qd-schedule-day-col { background: var(--surface); border:1px solid var(--border); border-radius: var(--radius); padding: 12px; min-width: 0; }
+.qd-schedule-day-head { font-family:'Rajdhani',sans-serif; font-weight:700; font-size:14px; margin-bottom:10px; display:flex; align-items:center; justify-content:space-between; }
+.qd-schedule-day-head.today { color: var(--accent); }
+.qd-lesson-card { background: var(--surface-2); border-radius: var(--radius-sm); padding:10px; margin-bottom:8px; border-left: 3px solid var(--accent); }
+.qd-lesson-top { display:flex; justify-content:space-between; align-items:flex-start; gap:6px; }
+.qd-lesson-subject { font-weight:700; font-size:13.5px; display:flex; align-items:center; gap:6px; }
+.qd-lesson-time { font-family:'JetBrains Mono',monospace; font-size:11.5px; color: var(--text-muted); margin-top:2px; }
+.qd-lesson-meta { font-size:12px; color: var(--text-muted); margin-top:4px; }
+.qd-lesson-actions { display:flex; gap:5px; margin-top:8px; flex-wrap:wrap; }
+.qd-subject-chip { display:inline-flex; align-items:center; gap:5px; font-size:11px; font-weight:700; padding:3px 8px; border-radius:999px; }
+.qd-schedule-mobile { display:none; }
+.qd-hw-item { display:flex; align-items:flex-start; gap:10px; padding:12px; border-radius: var(--radius-sm); background: var(--surface-2); margin-bottom:8px; }
+.qd-hw-priority { font-size:10.5px; font-weight:700; padding:2px 8px; border-radius:999px; text-transform:uppercase; }
+@media (max-width: 860px) {
+  .qd-schedule-table { display:none; }
+  .qd-schedule-mobile { display:block; }
+}
 `;
 
 /* ============================================================
@@ -458,7 +565,7 @@ function Field({ label, children }) {
    DASHBOARD
    ============================================================ */
 
-function Dashboard({ now, todayMeals, toggleMeal, xp, level, streak, upcomingEvent, todayWorkout, goTo }) {
+function Dashboard({ now, todayMeals, toggleMeal, xp, level, streak, upcomingEvent, todayWorkout, goTo, todayLessons = [], subjects = [] }) {
   const nextMeal = todayMeals.find((m) => m.status !== "erledigt");
   const doneCount = todayMeals.filter((m) => m.status === "erledigt").length;
   const countdown = useMemo(() => {
@@ -472,6 +579,21 @@ function Dashboard({ now, todayMeals, toggleMeal, xp, level, streak, upcomingEve
     const ss = Math.floor((diff % 60000) / 1000);
     return `${pad2(hh)}:${pad2(mm)}:${pad2(ss)}`;
   }, [nextMeal, now]);
+
+  const nowMin = now.getHours() * 60 + now.getMinutes();
+  const upcomingLessons = todayLessons.filter((l) => timeToMinutes(l.end) > nowMin).slice(0, 2);
+  const nextLesson = upcomingLessons[0];
+  const lessonCountdown = useMemo(() => {
+    if (!nextLesson) return null;
+    const [h, m] = nextLesson.start.split(":").map(Number);
+    const target = new Date(now); target.setHours(h, m, 0, 0);
+    let diff = target - now;
+    if (diff < 0) diff = 0;
+    const hh = Math.floor(diff / 3600000);
+    const mm = Math.floor((diff % 3600000) / 60000);
+    const ss = Math.floor((diff % 60000) / 1000);
+    return `${pad2(hh)}:${pad2(mm)}:${pad2(ss)}`;
+  }, [nextLesson, now]);
 
   return (
     <div>
@@ -508,11 +630,35 @@ function Dashboard({ now, todayMeals, toggleMeal, xp, level, streak, upcomingEve
         })}
       </div>
 
+      {todayLessons.length > 0 && (
+        <>
+          <div className="qd-section-title">📚 Als Nächstes</div>
+          <div className="qd-grid">
+            {upcomingLessons.length === 0 && (
+              <div className="qd-card"><div className="qd-meal-name">Kein weiterer Unterricht heute 🎉</div></div>
+            )}
+            {upcomingLessons.map((l, i) => {
+              const subj = getSubjectById(subjects, l.subjectId);
+              return (
+                <div key={l.id} className="qd-card">
+                  <div className="qd-meal-top">
+                    <span className="qd-meal-name">{subj?.icon || "📚"} {subj ? subj.name : "Unterricht"}</span>
+                    {i === 0 && <span className="qd-meal-time qd-mono">{lessonCountdown}</span>}
+                  </div>
+                  <div className="qd-meal-time" style={{ marginTop: 6 }}>{l.start}–{l.end}{(l.room || subj?.room) ? ` · Raum ${l.room || subj.room}` : ""}{(l.teacher || subj?.teacher) ? ` · ${l.teacher || subj.teacher}` : ""}</div>
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
+
       <div className="qd-section-title">Schnellzugriff</div>
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
         <button className="qd-btn qd-btn-primary" onClick={() => goTo("ai")}><Bot size={16} /> KI fragen</button>
         <button className="qd-btn qd-btn-secondary" onClick={() => goTo("training")}><Dumbbell size={16} /> Training öffnen</button>
         <button className="qd-btn qd-btn-secondary" onClick={() => goTo("calendar")}><CalendarIcon size={16} /> Kalender öffnen</button>
+        <button className="qd-btn qd-btn-secondary" onClick={() => goTo("schedule")}><BookOpen size={16} /> Stundenplan öffnen</button>
       </div>
     </div>
   );
@@ -873,7 +1019,7 @@ function WorkoutMini({ workout, onAdd }) {
    KALENDER
    ============================================================ */
 
-function Calendar({ events, addEvent, updateEvent, deleteEvent }) {
+function Calendar({ events, addEvent, updateEvent, deleteEvent, homework = [], subjects = [] }) {
   const [view, setView] = useState("month");
   const [cursor, setCursor] = useState(new Date());
   const [showForm, setShowForm] = useState(null);
@@ -888,7 +1034,15 @@ function Calendar({ events, addEvent, updateEvent, deleteEvent }) {
     return days;
   }, [cursor]);
 
-  const eventsFor = (d) => events.filter((e) => e.date === dateKey(d));
+  const eventsFor = (d) => {
+    const key = dateKey(d);
+    const real = events.filter((e) => e.date === key);
+    const hw = homework.filter((h) => h.dueDate === key && !h.done).map((h) => {
+      const subj = getSubjectById(subjects, h.subjectId);
+      return { id: `hw-${h.id}`, title: `Abgabe: ${subj ? subj.name : "Hausaufgabe"} – ${h.task}`, date: h.dueDate, time: "23:59", category: "hausaufgaben", virtual: true };
+    });
+    return [...real, ...hw];
+  };
 
   const shift = (delta) => {
     const c = new Date(cursor);
@@ -953,11 +1107,13 @@ function Calendar({ events, addEvent, updateEvent, deleteEvent }) {
                   return (
                     <div key={e.id} style={{ marginTop: 8, padding: 8, borderRadius: 10, background: "var(--surface-2)" }}>
                       <div style={{ fontSize: 13, fontWeight: 700 }}>{cat?.icon} {e.title}</div>
-                      <div className="qd-meal-time">{e.time}</div>
-                      <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
-                        <button className="qd-btn qd-btn-ghost qd-btn-sm" onClick={() => setShowForm(e)}><Pencil size={12} /></button>
-                        <button className="qd-btn qd-btn-danger qd-btn-sm" onClick={() => deleteEvent(e.id)}><Trash2 size={12} /></button>
-                      </div>
+                      <div className="qd-meal-time">{e.virtual ? "Fällig" : e.time}</div>
+                      {!e.virtual && (
+                        <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+                          <button className="qd-btn qd-btn-ghost qd-btn-sm" onClick={() => setShowForm(e)}><Pencil size={12} /></button>
+                          <button className="qd-btn qd-btn-danger qd-btn-sm" onClick={() => deleteEvent(e.id)}><Trash2 size={12} /></button>
+                        </div>
+                      )}
                     </div>
                   );
                 })}
@@ -1008,6 +1164,328 @@ function EventForm({ initial, onClose, onSave }) {
         </label>
       </Field>
       <button className="qd-btn qd-btn-primary qd-btn-block" disabled={!title.trim()} onClick={() => onSave({ id: initial.id, title, date, time, category, recurring, reminder })}>Speichern</button>
+    </Modal>
+  );
+}
+
+/* ============================================================
+   STUNDENPLAN
+   ============================================================ */
+
+function Schedule({ subjects, lessons, lessonExceptions, homework, scheduleSettings,
+  addSubject, updateSubject, deleteSubject, addLesson, updateLesson, deleteLesson,
+  setLessonException, addHomework, toggleHomeworkDone, deleteHomework, updateScheduleSettings }) {
+  const [tab, setTab] = useState("week");
+  const [weekOffset, setWeekOffset] = useState(0);
+  const [lessonForm, setLessonForm] = useState(null);
+  const [subjectForm, setSubjectForm] = useState(null);
+  const [hwForm, setHwForm] = useState(null);
+  const today = new Date();
+
+  const activeDays = scheduleSettings.weekendEnabled ? [0, 1, 2, 3, 4, 5, 6] : [0, 1, 2, 3, 4];
+
+  const weekStart = useMemo(() => {
+    const d = new Date(today);
+    d.setDate(d.getDate() - dayIndexMon0(today) + weekOffset * 7);
+    d.setHours(0, 0, 0, 0);
+    return d;
+    // eslint-disable-next-line
+  }, [weekOffset]);
+
+  const weekDates = activeDays.map((i) => { const d = new Date(weekStart); d.setDate(weekStart.getDate() + i); return d; });
+
+  const openNewLesson = (day, date) => setLessonForm({ day, date: dateKey(date) });
+  const openEditLesson = (lesson, date) => setLessonForm({ ...lesson, date: dateKey(date) });
+  const openCopyLesson = (lesson) => setLessonForm({ ...lesson, id: undefined, notes: lesson.notes });
+
+  return (
+    <div>
+      <h1 className="qd-h1">📚 Stundenplan</h1>
+      <p className="qd-sub">Dein Schulalltag auf einen Blick.</p>
+
+      <div className="qd-tabs">
+        <button className={`qd-tab ${tab === "week" ? "active" : ""}`} onClick={() => setTab("week")}>Wochenplan</button>
+        <button className={`qd-tab ${tab === "subjects" ? "active" : ""}`} onClick={() => setTab("subjects")}>📖 Fächer</button>
+        <button className={`qd-tab ${tab === "hw" ? "active" : ""}`} onClick={() => setTab("hw")}>📝 Hausaufgaben</button>
+        <button className={`qd-tab ${tab === "settings" ? "active" : ""}`} onClick={() => setTab("settings")}>⚙️ Einstellungen</button>
+      </div>
+
+      {tab === "week" && (
+        <>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
+            <button className="qd-btn qd-btn-secondary qd-btn-sm" onClick={() => setWeekOffset((w) => w - 1)}><ChevronLeft size={14} /> Vorherige Woche</button>
+            <button className="qd-btn qd-btn-secondary qd-btn-sm" onClick={() => setWeekOffset(0)}>Heute</button>
+            <button className="qd-btn qd-btn-secondary qd-btn-sm" onClick={() => setWeekOffset((w) => w + 1)}>Nächste Woche <ChevronRight size={14} /></button>
+            <span style={{ fontSize: 13, color: "var(--text-muted)" }}>{weekDates[0].getDate()}.{weekDates[0].getMonth() + 1}. – {weekDates[weekDates.length - 1].getDate()}.{weekDates[weekDates.length - 1].getMonth() + 1}.{weekDates[weekDates.length - 1].getFullYear()}</span>
+          </div>
+
+          <div className="qd-schedule-table">
+            <div className="qd-schedule-cols" style={{ gridTemplateColumns: `repeat(${weekDates.length}, minmax(150px,1fr))` }}>
+              {weekDates.map((d, i) => {
+                const isToday = dateKey(d) === dateKey(today);
+                const dayLessons = getLessonsForDate(d, lessons, lessonExceptions);
+                return (
+                  <div key={i} className="qd-schedule-day-col">
+                    <div className={`qd-schedule-day-head ${isToday ? "today" : ""}`}>{WEEKDAYS_DE[dayIndexMon0(d)]} <span className="qd-meal-time">{d.getDate()}.{d.getMonth() + 1}.</span></div>
+                    {dayLessons.length === 0 && <div className="qd-meal-time">Keine Stunden</div>}
+                    {dayLessons.map((l) => {
+                      const subj = getSubjectById(subjects, l.subjectId);
+                      return (
+                        <div key={l.id} className="qd-lesson-card" style={{ borderLeftColor: subj?.color || "var(--accent)" }}>
+                          <div className="qd-lesson-top">
+                            <span className="qd-lesson-subject">{subj?.icon || "📚"} {subj ? subj.name : "Unterricht"}</span>
+                          </div>
+                          <div className="qd-lesson-time">{l.start}–{l.end}</div>
+                          {(l.room || subj?.room || l.teacher || subj?.teacher) && (
+                            <div className="qd-lesson-meta">{[l.room || subj?.room, l.teacher || subj?.teacher].filter(Boolean).join(" · ")}</div>
+                          )}
+                          {l.notes && <div className="qd-lesson-meta">{l.notes}</div>}
+                          <div className="qd-lesson-actions">
+                            <button className="qd-btn qd-btn-ghost qd-btn-sm" onClick={() => openEditLesson(l, d)}><Pencil size={11} /></button>
+                            <button className="qd-btn qd-btn-ghost qd-btn-sm" onClick={() => openCopyLesson(l)}><Copy size={11} /></button>
+                            <button className="qd-btn qd-btn-danger qd-btn-sm" onClick={() => deleteLesson(l.id)}><Trash2 size={11} /></button>
+                          </div>
+                          <button className="qd-btn qd-btn-secondary qd-btn-sm qd-btn-block" style={{ marginTop: 6 }} onClick={() => setHwForm({ subjectId: l.subjectId, dueDate: dateKey(d) })}>+ Hausaufgabe</button>
+                        </div>
+                      );
+                    })}
+                    <button className="qd-btn qd-btn-primary qd-btn-sm qd-btn-block" style={{ marginTop: 4 }} onClick={() => openNewLesson(dayIndexMon0(d), d)}><Plus size={12} /> Stunde</button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="qd-schedule-mobile">
+            {weekDates.map((d, i) => {
+              const isToday = dateKey(d) === dateKey(today);
+              const dayLessons = getLessonsForDate(d, lessons, lessonExceptions);
+              return (
+                <div key={i} className="qd-card" style={{ marginBottom: 14 }}>
+                  <div className={`qd-schedule-day-head ${isToday ? "today" : ""}`}>{WEEKDAYS_DE[dayIndexMon0(d)].toUpperCase()} <span className="qd-meal-time">{d.getDate()}.{d.getMonth() + 1}.</span></div>
+                  {dayLessons.length === 0 && <div className="qd-meal-time" style={{ marginBottom: 8 }}>Keine Stunden</div>}
+                  {dayLessons.map((l) => {
+                    const subj = getSubjectById(subjects, l.subjectId);
+                    return (
+                      <div key={l.id} className="qd-lesson-card" style={{ borderLeftColor: subj?.color || "var(--accent)" }}>
+                        <div className="qd-lesson-time">{l.start}–{l.end}</div>
+                        <div className="qd-lesson-subject">{subj?.icon || "📚"} {subj ? subj.name : "Unterricht"}</div>
+                        {(l.room || subj?.room || l.teacher || subj?.teacher) && (
+                          <div className="qd-lesson-meta">{[l.room || subj?.room, l.teacher || subj?.teacher].filter(Boolean).join(" · ")}</div>
+                        )}
+                        <div className="qd-lesson-actions">
+                          <button className="qd-btn qd-btn-ghost qd-btn-sm" onClick={() => openEditLesson(l, d)}><Pencil size={11} /></button>
+                          <button className="qd-btn qd-btn-ghost qd-btn-sm" onClick={() => openCopyLesson(l)}><Copy size={11} /></button>
+                          <button className="qd-btn qd-btn-danger qd-btn-sm" onClick={() => deleteLesson(l.id)}><Trash2 size={11} /></button>
+                          <button className="qd-btn qd-btn-secondary qd-btn-sm" onClick={() => setHwForm({ subjectId: l.subjectId, dueDate: dateKey(d) })}>+ HA</button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  <button className="qd-btn qd-btn-primary qd-btn-sm qd-btn-block" onClick={() => openNewLesson(dayIndexMon0(d), d)}><Plus size={12} /> Stunde hinzufügen</button>
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
+
+      {tab === "subjects" && (
+        <>
+          <button className="qd-btn qd-btn-primary" style={{ marginBottom: 16 }} onClick={() => setSubjectForm({})}><Plus size={14} /> Fach hinzufügen</button>
+          <div className="qd-grid">
+            {subjects.length === 0 && <div className="qd-empty">Noch keine Fächer angelegt.</div>}
+            {subjects.map((s) => (
+              <div key={s.id} className="qd-card">
+                <div className="qd-subject-chip" style={{ background: (s.color || "#888") + "33", color: s.color }}>{s.icon} {s.name}</div>
+                <div className="qd-meal-time" style={{ marginTop: 8 }}>{[s.teacher, s.room].filter(Boolean).join(" · ") || "Keine Details"}</div>
+                <div className="qd-meal-actions">
+                  <button className="qd-btn qd-btn-ghost qd-btn-sm" onClick={() => setSubjectForm(s)}><Pencil size={13} /></button>
+                  <button className="qd-btn qd-btn-danger qd-btn-sm" onClick={() => deleteSubject(s.id)}><Trash2 size={13} /></button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      {tab === "hw" && (
+        <>
+          <button className="qd-btn qd-btn-primary" style={{ marginBottom: 16 }} onClick={() => setHwForm({})}><Plus size={14} /> Hausaufgabe hinzufügen</button>
+          {homework.length === 0 && <div className="qd-empty">Noch keine Hausaufgaben eingetragen.</div>}
+          {[...homework].sort((a, b) => a.dueDate.localeCompare(b.dueDate)).map((h) => {
+            const subj = getSubjectById(subjects, h.subjectId);
+            const prio = HW_PRIORITIES.find((p) => p.key === h.priority) || HW_PRIORITIES[1];
+            return (
+              <div key={h.id} className="qd-hw-item">
+                <button className={`qd-checkbox-btn ${h.done ? "checked" : ""}`} onClick={() => toggleHomeworkDone(h.id)}>{h.done ? <Check size={16} /> : null}</button>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontWeight: 700, fontSize: 13.5, textDecoration: h.done ? "line-through" : "none", opacity: h.done ? 0.55 : 1 }}>{subj ? `${subj.icon || ""} ${subj.name}` : "Fach"}: {h.task}</div>
+                  <div className="qd-meal-time" style={{ marginTop: 4 }}>Fällig: {h.dueDate}{h.notes ? ` · ${h.notes}` : ""}</div>
+                </div>
+                <span className="qd-hw-priority" style={{ background: prio.color + "33", color: prio.color }}>{prio.label}</span>
+                <button className="qd-btn qd-btn-danger qd-btn-sm" onClick={() => deleteHomework(h.id)}><Trash2 size={12} /></button>
+              </div>
+            );
+          })}
+        </>
+      )}
+
+      {tab === "settings" && (
+        <div className="qd-card">
+          <Field label="Erinnerung vor Unterrichtsbeginn">
+            <select className="qd-select" value={scheduleSettings.reminderMinutes} onChange={(e) => updateScheduleSettings({ reminderMinutes: Number(e.target.value) })}>
+              {REMINDER_OPTIONS.map((m) => <option key={m} value={m}>{m} Minuten</option>)}
+            </select>
+          </Field>
+          <ToggleRow label="Samstag & Sonntag anzeigen" checked={scheduleSettings.weekendEnabled} onChange={(v) => updateScheduleSettings({ weekendEnabled: v })} />
+        </div>
+      )}
+
+      {lessonForm && (
+        <LessonForm
+          initial={lessonForm}
+          subjects={subjects}
+          onClose={() => setLessonForm(null)}
+          onSave={(l) => { if (l.id) updateLesson(l); else addLesson({ ...l, id: uid() }); setLessonForm(null); }}
+          onQuickAddSubject={(s) => addSubject(s)}
+        />
+      )}
+      {subjectForm && (
+        <SubjectForm
+          initial={subjectForm}
+          onClose={() => setSubjectForm(null)}
+          onSave={(s) => { if (s.id) updateSubject(s); else addSubject({ ...s, id: uid() }); setSubjectForm(null); }}
+        />
+      )}
+      {hwForm && (
+        <HomeworkForm
+          initial={hwForm}
+          subjects={subjects}
+          onClose={() => setHwForm(null)}
+          onSave={(h) => { addHomework({ ...h, id: uid(), done: false }); setHwForm(null); }}
+        />
+      )}
+    </div>
+  );
+}
+
+function LessonForm({ initial, subjects, onClose, onSave, onQuickAddSubject }) {
+  const [subjectId, setSubjectId] = useState(initial.subjectId || (subjects[0]?.id || ""));
+  const [day, setDay] = useState(initial.day ?? 0);
+  const [start, setStart] = useState(initial.start || "08:00");
+  const [end, setEnd] = useState(initial.end || "08:45");
+  const [room, setRoom] = useState(initial.room || "");
+  const [teacher, setTeacher] = useState(initial.teacher || "");
+  const [notes, setNotes] = useState(initial.notes || "");
+  const [onlyThisDate, setOnlyThisDate] = useState(false);
+  const [quickName, setQuickName] = useState("");
+
+  const quickAddSubject = () => {
+    if (!quickName.trim()) return;
+    const s = { id: uid(), name: quickName.trim(), teacher: "", room: "", color: SUBJECT_COLORS[subjects.length % SUBJECT_COLORS.length], icon: SUBJECT_ICONS[subjects.length % SUBJECT_ICONS.length] };
+    onQuickAddSubject(s);
+    setSubjectId(s.id);
+    setQuickName("");
+  };
+
+  return (
+    <Modal title={initial.id ? "Unterrichtsstunde bearbeiten" : "Unterrichtsstunde hinzufügen"} onClose={onClose}>
+      <Field label="Fach">
+        {subjects.length > 0 ? (
+          <select className="qd-select" value={subjectId} onChange={(e) => setSubjectId(e.target.value)}>
+            {subjects.map((s) => <option key={s.id} value={s.id}>{s.icon} {s.name}</option>)}
+          </select>
+        ) : (
+          <div style={{ display: "flex", gap: 8 }}>
+            <input className="qd-input" placeholder="z. B. Mathematik" value={quickName} onChange={(e) => setQuickName(e.target.value)} />
+            <button className="qd-btn qd-btn-secondary qd-btn-sm" onClick={quickAddSubject}>Anlegen</button>
+          </div>
+        )}
+      </Field>
+      <Field label="Wochentag">
+        <select className="qd-select" value={day} onChange={(e) => setDay(Number(e.target.value))}>
+          {WEEKDAYS_DE.map((w, i) => <option key={w} value={i}>{w}</option>)}
+        </select>
+      </Field>
+      <div style={{ display: "flex", gap: 10 }}>
+        <Field label="Startzeit"><input type="time" className="qd-input" value={start} onChange={(e) => setStart(e.target.value)} /></Field>
+        <Field label="Endzeit"><input type="time" className="qd-input" value={end} onChange={(e) => setEnd(e.target.value)} /></Field>
+      </div>
+      <Field label="Raum (optional)"><input className="qd-input" value={room} onChange={(e) => setRoom(e.target.value)} placeholder="z. B. 204" /></Field>
+      <Field label="Lehrer (optional)"><input className="qd-input" value={teacher} onChange={(e) => setTeacher(e.target.value)} placeholder="z. B. Herr Müller" /></Field>
+      <Field label="Notizen (optional)"><textarea className="qd-textarea" rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} /></Field>
+      {initial.id && (
+        <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, marginBottom: 14 }}>
+          <input type="checkbox" checked={onlyThisDate} onChange={(e) => setOnlyThisDate(e.target.checked)} /> Nur für dieses eine Datum ändern
+        </label>
+      )}
+      <button
+        className="qd-btn qd-btn-primary qd-btn-block"
+        disabled={!subjectId}
+        onClick={() => onSave({ id: initial.id, subjectId, day, start, end, room, teacher, notes, specificDate: onlyThisDate ? initial.date : initial.specificDate })}
+      >
+        Speichern
+      </button>
+    </Modal>
+  );
+}
+
+function SubjectForm({ initial, onClose, onSave }) {
+  const [name, setName] = useState(initial.name || "");
+  const [teacher, setTeacher] = useState(initial.teacher || "");
+  const [room, setRoom] = useState(initial.room || "");
+  const [color, setColor] = useState(initial.color || SUBJECT_COLORS[0]);
+  const [icon, setIcon] = useState(initial.icon || SUBJECT_ICONS[0]);
+
+  return (
+    <Modal title={initial.id ? "Fach bearbeiten" : "Fach hinzufügen"} onClose={onClose}>
+      <Field label="Name"><input className="qd-input" value={name} onChange={(e) => setName(e.target.value)} placeholder="z. B. Mathematik" /></Field>
+      <Field label="Lehrer (optional)"><input className="qd-input" value={teacher} onChange={(e) => setTeacher(e.target.value)} /></Field>
+      <Field label="Raum (optional)"><input className="qd-input" value={room} onChange={(e) => setRoom(e.target.value)} /></Field>
+      <Field label="Farbe">
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {SUBJECT_COLORS.map((c) => (
+            <div key={c} onClick={() => setColor(c)} style={{ width: 28, height: 28, borderRadius: "50%", background: c, cursor: "pointer", border: color === c ? "2px solid white" : "2px solid transparent" }} />
+          ))}
+        </div>
+      </Field>
+      <Field label="Symbol">
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {SUBJECT_ICONS.map((ic) => (
+            <div key={ic} onClick={() => setIcon(ic)} style={{ width: 32, height: 32, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", background: icon === ic ? "var(--accent-soft)" : "var(--surface-2)", cursor: "pointer", fontSize: 16 }}>{ic}</div>
+          ))}
+        </div>
+      </Field>
+      <button className="qd-btn qd-btn-primary qd-btn-block" disabled={!name.trim()} onClick={() => onSave({ id: initial.id, name: name.trim(), teacher, room, color, icon })}>Speichern</button>
+    </Modal>
+  );
+}
+
+function HomeworkForm({ initial, subjects, onClose, onSave }) {
+  const [subjectId, setSubjectId] = useState(initial.subjectId || (subjects[0]?.id || ""));
+  const [task, setTask] = useState(initial.task || "");
+  const [dueDate, setDueDate] = useState(initial.dueDate || dateKey(new Date()));
+  const [priority, setPriority] = useState(initial.priority || "mittel");
+  const [notes, setNotes] = useState(initial.notes || "");
+
+  return (
+    <Modal title="Hausaufgabe hinzufügen" onClose={onClose}>
+      <Field label="Fach">
+        <select className="qd-select" value={subjectId} onChange={(e) => setSubjectId(e.target.value)}>
+          {subjects.length === 0 && <option value="">Kein Fach angelegt</option>}
+          {subjects.map((s) => <option key={s.id} value={s.id}>{s.icon} {s.name}</option>)}
+        </select>
+      </Field>
+      <Field label="Aufgabe"><input className="qd-input" value={task} onChange={(e) => setTask(e.target.value)} placeholder="z. B. Seite 42, Aufgabe 3–5" /></Field>
+      <Field label="Abgabedatum"><input type="date" className="qd-input" value={dueDate} onChange={(e) => setDueDate(e.target.value)} /></Field>
+      <Field label="Priorität">
+        <select className="qd-select" value={priority} onChange={(e) => setPriority(e.target.value)}>
+          {HW_PRIORITIES.map((p) => <option key={p.key} value={p.key}>{p.label}</option>)}
+        </select>
+      </Field>
+      <Field label="Notizen (optional)"><textarea className="qd-textarea" rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} /></Field>
+      <button className="qd-btn qd-btn-primary qd-btn-block" disabled={!task.trim()} onClick={() => onSave({ subjectId, task: task.trim(), dueDate, priority, notes })}>Speichern</button>
     </Modal>
   );
 }
@@ -1173,6 +1651,7 @@ const NAV = [
   { key: "training", label: "Training", icon: Dumbbell },
   { key: "ai", label: "KI-Assistent", icon: Bot },
   { key: "calendar", label: "Kalender", icon: CalendarIcon },
+  { key: "schedule", label: "Stundenplan", icon: BookOpen },
   { key: "progress", label: "Fortschritt", icon: TrendingUp },
   { key: "settings", label: "Einstellungen", icon: SettingsIcon },
 ];
@@ -1197,6 +1676,11 @@ export default function App() {
   const [xp, setXp] = useState(() => loadLS("qd_xp", 0));
   const [weightLog, setWeightLog] = useState(() => loadLS("qd_weight", []));
   const [chatData, setChatData] = useState(() => loadLS("qd_chat", { conversations: [], currentId: null }));
+  const [subjects, setSubjects] = useState(() => loadLS("qd_subjects", []));
+  const [lessons, setLessons] = useState(() => loadLS("qd_lessons", []));
+  const [lessonExceptions, setLessonExceptions] = useState(() => loadLS("qd_lesson_exceptions", {}));
+  const [homework, setHomework] = useState(() => loadLS("qd_homework", []));
+  const [scheduleSettings, setScheduleSettings] = useState(() => loadLS("qd_schedule_settings", { reminderMinutes: 10, weekendEnabled: false }));
   const notifiedKeysRef = useRef(new Set(loadLS("qd_notified_keys", [])));
 
   const todayKey = dateKey(now);
@@ -1212,6 +1696,11 @@ export default function App() {
   useEffect(() => saveLS("qd_xp", xp), [xp]);
   useEffect(() => saveLS("qd_weight", weightLog), [weightLog]);
   useEffect(() => saveLS("qd_chat", chatData), [chatData]);
+  useEffect(() => saveLS("qd_subjects", subjects), [subjects]);
+  useEffect(() => saveLS("qd_lessons", lessons), [lessons]);
+  useEffect(() => saveLS("qd_lesson_exceptions", lessonExceptions), [lessonExceptions]);
+  useEffect(() => saveLS("qd_homework", homework), [homework]);
+  useEffect(() => saveLS("qd_schedule_settings", scheduleSettings), [scheduleSettings]);
 
   useEffect(() => {
     if (!mealsByDate[todayKey]) {
@@ -1256,6 +1745,18 @@ export default function App() {
         notifiedKeysRef.current.add(key);
         saveLS("qd_notified_keys", Array.from(notifiedKeysRef.current));
         pushNotification({ type: "training", title: "Training heute! 💪", message: `Vergiss nicht: ${t.title}` });
+      }
+    });
+    getLessonsForDate(now, lessons, lessonExceptions).forEach((l) => {
+      const key = `lesson-${l.id}-${todayKey}`;
+      const diff = timeToMinutes(l.start) - nowMin;
+      if (diff <= scheduleSettings.reminderMinutes && diff >= 0 && !notifiedKeysRef.current.has(key)) {
+        notifiedKeysRef.current.add(key);
+        saveLS("qd_notified_keys", Array.from(notifiedKeysRef.current));
+        const subj = getSubjectById(subjects, l.subjectId);
+        const room = l.room || subj?.room;
+        const teacher = l.teacher || subj?.teacher;
+        pushNotification({ type: "lesson", title: "Unterricht bald! 📚", message: `In ${scheduleSettings.reminderMinutes} Minuten beginnt ${subj ? subj.name : "Unterricht"}${teacher ? ` bei ${teacher}` : ""}${room ? ` in Raum ${room}` : ""}.` });
       }
     });
     // eslint-disable-next-line
@@ -1317,9 +1818,30 @@ export default function App() {
 
   const addWeight = (value) => setWeightLog((prev) => [...prev, { date: todayKey, value }]);
 
+  const addSubject = (s) => setSubjects((prev) => [...prev, s]);
+  const updateSubject = (s) => setSubjects((prev) => prev.map((x) => x.id === s.id ? s : x));
+  const deleteSubject = (id) => setSubjects((prev) => prev.filter((s) => s.id !== id));
+
+  const addLesson = (l) => setLessons((prev) => [...prev, l]);
+  const updateLesson = (l) => {
+    if (l.specificDate && !lessons.find((x) => x.id === l.id)?.specificDate) {
+      // "nur für dieses Datum" auf einer wiederkehrenden Stunde -> als Ausnahme speichern, Vorlage bleibt unverändert
+      setLessonExceptions((prev) => ({ ...prev, [`${l.id}_${l.specificDate}`]: { start: l.start, end: l.end, room: l.room, teacher: l.teacher, notes: l.notes } }));
+    } else {
+      setLessons((prev) => prev.map((x) => x.id === l.id ? l : x));
+    }
+  };
+  const deleteLesson = (id) => setLessons((prev) => prev.filter((l) => l.id !== id));
+  const setLessonException = (lessonId, dateStr, patch) => setLessonExceptions((prev) => ({ ...prev, [`${lessonId}_${dateStr}`]: patch }));
+
+  const addHomework = (h) => setHomework((prev) => [...prev, h]);
+  const toggleHomeworkDone = (id) => setHomework((prev) => prev.map((h) => h.id === id ? { ...h, done: !h.done } : h));
+  const deleteHomework = (id) => setHomework((prev) => prev.filter((h) => h.id !== id));
+  const updateScheduleSettings = (patch) => setScheduleSettings((prev) => ({ ...prev, ...patch }));
+
   const updateSettings = (patch) => setSettings((prev) => ({ ...prev, ...patch }));
   const resetAll = () => {
-    ["qd_settings", "qd_meals", "qd_training_plan", "qd_training_history", "qd_events", "qd_favorites", "qd_notifications", "qd_xp", "qd_weight", "qd_chat", "qd_notified_keys"].forEach((k) => window.localStorage.removeItem(k));
+    ["qd_settings", "qd_meals", "qd_training_plan", "qd_training_history", "qd_events", "qd_favorites", "qd_notifications", "qd_xp", "qd_weight", "qd_chat", "qd_notified_keys", "qd_subjects", "qd_lessons", "qd_lesson_exceptions", "qd_homework", "qd_schedule_settings"].forEach((k) => window.localStorage.removeItem(k));
     window.location.reload();
   };
 
@@ -1349,8 +1871,13 @@ export default function App() {
     return s;
   }, [mealsByDate, now]);
 
+  const todayLessons = useMemo(() => getLessonsForDate(now, lessons, lessonExceptions), [now, lessons, lessonExceptions]);
+  const eventsToday = useMemo(() => events.filter((e) => e.date === todayKey), [events, todayKey]);
+
   const ctx = {
     todayMeals, todayWorkout,
+    subjects, homework, eventsToday,
+    getLessonsForDate: (d) => getLessonsForDate(d, lessons, lessonExceptions),
     chat: { conversations: chatData.conversations, currentId: chatData.currentId },
     saveChat: (conversations, currentId) => setChatData({ conversations, currentId }),
   };
@@ -1410,11 +1937,16 @@ export default function App() {
           )}
 
           <div className="qd-content">
-            {page === "dashboard" && <Dashboard now={now} todayMeals={todayMeals} toggleMeal={toggleMeal} xp={xp} level={level} streak={streak} upcomingEvent={upcomingEvent} todayWorkout={todayWorkout} goTo={goTo} />}
+            {page === "dashboard" && <Dashboard now={now} todayMeals={todayMeals} toggleMeal={toggleMeal} xp={xp} level={level} streak={streak} upcomingEvent={upcomingEvent} todayWorkout={todayWorkout} goTo={goTo} todayLessons={todayLessons} subjects={subjects} />}
             {page === "nutrition" && <Nutrition todayMeals={todayMeals} toggleMeal={toggleMeal} rotateMealAt={rotateMealAt} renameMeal={renameMeal} addCustomMeal={addCustomMeal} favorites={favorites} toggleFavoriteMeal={toggleFavoriteMeal} />}
             {page === "training" && <Training trainingPlan={trainingPlan} addTraining={addTraining} toggleTrainingDone={toggleTrainingDone} deleteTraining={deleteTraining} history={trainingHistory} favorites={favorites} toggleFavExercise={toggleFavExercise} />}
             {page === "ai" && <AIAssistant ctx={ctx} addRecipeToPlan={addRecipeToPlan} addWorkoutToPlan={addWorkoutToPlan} favorites={favorites} toggleFavRecipe={toggleFavRecipe} />}
-            {page === "calendar" && <Calendar events={events} addEvent={addEvent} updateEvent={updateEvent} deleteEvent={deleteEvent} />}
+            {page === "calendar" && <Calendar events={events} addEvent={addEvent} updateEvent={updateEvent} deleteEvent={deleteEvent} homework={homework} subjects={subjects} />}
+            {page === "schedule" && <Schedule subjects={subjects} lessons={lessons} lessonExceptions={lessonExceptions} homework={homework} scheduleSettings={scheduleSettings}
+              addSubject={addSubject} updateSubject={updateSubject} deleteSubject={deleteSubject}
+              addLesson={addLesson} updateLesson={updateLesson} deleteLesson={deleteLesson} setLessonException={setLessonException}
+              addHomework={addHomework} toggleHomeworkDone={toggleHomeworkDone} deleteHomework={deleteHomework}
+              updateScheduleSettings={updateScheduleSettings} />}
             {page === "progress" && <Progress mealsByDate={mealsByDate} trainingHistory={trainingHistory} weightLog={weightLog} addWeight={addWeight} />}
             {page === "settings" && <SettingsPage settings={settings} updateSettings={updateSettings} resetAll={resetAll} notifPermission={notifPermission} requestNotifPermission={requestNotifPermission} />}
           </div>
